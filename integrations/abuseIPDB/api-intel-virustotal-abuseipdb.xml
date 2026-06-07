@@ -1,0 +1,9 @@
+<ossec_config>
+  <integration>
+    <name>custom-abuseipdb</name>
+    <hook_url>https://api.abuseipdb.com/api/v2/check</hook_url>
+    <api_key><YOUR_ABUSEIPDB_API_KEY_HERE></api_key>
+    <rule_id>5710,5712,5716,5763,31151,60204</rule_id>
+    <alert_format>json</alert_format>
+  </integration>
+</ossec_config>

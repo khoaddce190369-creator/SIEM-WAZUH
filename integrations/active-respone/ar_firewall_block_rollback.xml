@@ -1,0 +1,74 @@
+<remote>
+    <connection>syslog</connection>
+    <port>514</port>
+    <protocol>udp</protocol>
+    <allowed-ips>any</allowed-ips> 
+  </remote>
+
+  <integration>
+    <name>virustotal</name>
+    <api_key><YOUR_VIRUSTOTAL_API_KEY_HERE></api_key>
+    <rule_id>554</rule_id>
+    <alert_format>json</alert_format>
+  </integration>
+
+  <integration>
+    <name>custom-abuseipdb</name>
+    <hook_url>https://api.abuseipdb.com/api/v2/check</hook_url>
+    <api_key><YOUR_ABUSEIPDB_API_KEY_HERE></api_key>
+    <rule_id>5710,5712,5716,5763,31151,60204</rule_id>
+    <alert_format>json</alert_format>
+  </integration>
+
+  <integration>
+    <name>custom-telegram</name>
+    <hook_url>https://api.telegram.org/bot<YOUR_TELEGRAM_BOT_TOKEN_HERE>/sendMessage</hook_url>
+    <level>10</level>
+    <rule_id>100050,5712,5720,100099,5551,100250,87105,60204</rule_id> 
+    <alert_format>json</alert_format>
+  </integration>
+
+  <command>
+    <name>firewall-drop</name>
+    <executable>firewall-drop</executable>
+    <timeout_allowed>yes</timeout_allowed>
+  </command>
+
+  <active-response>
+    <command>firewall-drop</command>
+    <location>local</location>
+    <rules_id>5763</rules_id>
+    <timeout>300</timeout>
+  </active-response>
+
+  <active-response>
+    <command>firewall-drop</command>
+    <location>local</location>
+    <rules_id>31103,31106,40111</rules_id>
+    <timeout>900</timeout>
+  </active-response>
+
+  <command>
+    <name>win_netsh</name>
+    <executable>netsh.exe</executable>
+    <timeout_allowed>yes</timeout_allowed>
+  </command>
+
+  <active-response>
+    <command>win_netsh</command>
+    <location>local</location>
+    <rules_id>60204</rules_id>
+    <timeout>300</timeout>
+  </active-response>
+
+  <command>
+    <name>custom-quarantine</name>
+    <executable>custom-quarantine.py</executable>
+    <timeout_allowed>no</timeout_allowed>
+  </command>
+
+  <active-response>
+    <command>custom-quarantine</command>
+    <location>local</location>
+    <rules_id>87105</rules_id>
+  </active-response>

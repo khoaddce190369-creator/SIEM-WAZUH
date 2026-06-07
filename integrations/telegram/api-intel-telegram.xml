@@ -1,0 +1,9 @@
+<ossec_config>
+  <integration>
+    <name>custom-telegram</name>
+    <hook_url>https://api.telegram.org/bot<YOUR_TELEGRAM_BOT_TOKEN_HERE>/sendMessage</hook_url>
+    <level>10</level>
+    <rule_id>100050,5712,5720,100099,5551,100250,87105,60204</rule_id> 
+    <alert_format>json</alert_format>
+  </integration>
+</ossec_config>
