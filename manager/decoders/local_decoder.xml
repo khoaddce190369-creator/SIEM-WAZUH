@@ -410,3 +410,13 @@
   <regex offset="after_parent">\pData Name="Archived"\p(\.+)\p/Data\p</regex>
   <order>eventdata.archived</order>
 </decoder>
+
+<decoder name="juiceshop-web">
+  <prematch type="pcre2">^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+ - \S+ \[</prematch>
+</decoder>
+
+<decoder name="juiceshop-web-child">
+  <parent>juiceshop-web</parent>
+  <regex type="pcre2" offset="after_parent">^[^\]]+\] "(\S+) (\S+) \S+" ([0-9]+) ([0-9]+|-) "(\S+)"</regex>
+  <order>method, url, status, size, referer</order>
+</decoder>
