@@ -1,0 +1,567 @@
+#!/usr/bin/env python3
+# =============================================================================
+# custom-thehive — Wazuh → TheHive 5 Alert/Case Integration
+# =============================================================================
+# Deploy:
+#   cp custom-thehive /var/ossec/integrations/
+#   chmod 750 /var/ossec/integrations/custom-thehive
+#   chown root:wazuh /var/ossec/integrations/custom-thehive
+#
+# ossec.conf (Manager) — thêm block này:
+#   <integration>
+#     <name>custom-thehive</name>
+#     <hook_url>http://192.168.0.15:9000</hook_url>
+#     <api_key>YOUR_THEHIVE_API_KEY</api_key>
+#     <alert_format>json</alert_format>
+#     <level>10</level>
+#   </integration>
+#
+# Wazuh integratord gọi script này với argv:
+#   argv[1] = path file JSON chứa alert
+#   argv[2] = api_key từ hook_url (unused nếu dùng header)
+#   argv[3] = hook_url
+#
+# TheHive 5 API endpoint: POST /api/v1/alert  → tạo Alert
+#                         POST /api/v1/alert/{id}/case → promote Alert → Case
+# =============================================================================
+
+import sys
+import os
+import json
+import logging
+import urllib.request
+import urllib.error
+import urllib.parse
+import datetime
+import hashlib
+
+# ---------------------------------------------------------------------------
+# CONFIG — chỉnh theo môi trường lab
+# ---------------------------------------------------------------------------
+THEHIVE_URL    = "http://192.168.0.15:9000"          # TheHive 5 host
+THEHIVE_APIKEY = "nPIHWveBfocf59WQO3RsBGJT9uckveUu"  # override bằng argv[2] nếu có
+
+# Level ngưỡng để tự động promote Alert → Case (không cần analyst approve)
+AUTO_PROMOTE_LEVEL = 10   # Critical = Wazuh level >= 12
+
+# Severity mapping: Wazuh level → TheHive severity (1=Low,2=Medium,3=High,4=Critical)
+SEVERITY_MAP = {
+    range(1,  8):  1,   # Low
+    range(8,  11): 2,   # Medium
+    range(11, 13): 3,   # High
+    range(13, 16): 4,   # Critical
+}
+
+# TLP/PAP defaults cho lab
+TLP_DEFAULT = 2   # TLP:AMBER
+PAP_DEFAULT = 2   # PAP:AMBER
+
+# Tags mặc định gắn vào mọi alert từ Wazuh
+BASE_TAGS = ["wazuh", "siem", "auto-ingested"]
+
+# Timeout HTTP requests
+HTTP_TIMEOUT = 10  # giây
+
+# ---------------------------------------------------------------------------
+# LOGGING — ghi vào /var/ossec/logs để integratord không nuốt error
+# ---------------------------------------------------------------------------
+LOG_FILE = "/var/ossec/logs/integrations/thehive.log"
+os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+
+logging.basicConfig(
+    filename=LOG_FILE,
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S"
+)
+log = logging.getLogger("custom-thehive")
+
+
+# ---------------------------------------------------------------------------
+# UTILITIES
+# ---------------------------------------------------------------------------
+
+def wazuh_level_to_severity(level: int) -> int:
+    """Map Wazuh rule level (1-15) → TheHive severity (1-4)."""
+    for r, sev in SEVERITY_MAP.items():
+        if level in r:
+            return sev
+    return 2  # default Medium nếu out of range
+
+
+def wazuh_level_to_tlp(level: int) -> int:
+    """High/Critical alert → TLP:RED, còn lại TLP:AMBER."""
+    return 3 if level >= 12 else TLP_DEFAULT
+
+
+def extract_iocs(alert: dict) -> list[dict]:
+    """
+    Bóc tách IOC từ alert để gắn vào TheHive Observable.
+    Wazuh alert có thể chứa IP, hash, domain ở nhiều field khác nhau.
+    Trả về list observable dict theo TheHive v5 format.
+    """
+    observables = []
+    data = alert.get("data", {})
+
+    # --- IP addresses ---
+    ip_fields = [
+        data.get("srcip"),
+        data.get("dstip"),
+        data.get("win", {}).get("eventdata", {}).get("destinationIp"),
+    ]
+    for ip in ip_fields:
+        if ip and _is_valid_ip(ip):
+            observables.append({
+                "dataType": "ip",
+                "data": ip,
+                "message": "Extracted from Wazuh alert",
+                "tags": ["wazuh-ioc"],
+                "tlp": TLP_DEFAULT,
+                "ioc": True,
+                "sighted": True,
+            })
+
+    # --- File hashes (FIM) ---
+    syscheck = alert.get("syscheck", {})
+    for hash_field, hash_type in [("md5_after", "hash"), ("sha256_after", "hash")]:
+        h = syscheck.get(hash_field)
+        if h and h not in ("", "xxx"):
+            observables.append({
+                "dataType": hash_type,
+                "data": h,
+                "message": f"FIM {hash_field}: {syscheck.get('path', 'unknown')}",
+                "tags": ["wazuh-fim", "wazuh-ioc"],
+                "tlp": TLP_DEFAULT,
+                "ioc": True,
+                "sighted": True,
+            })
+
+    # --- Domain (Sysmon Event 22 DNS) ---
+    dns_query = (data.get("win", {})
+                     .get("eventdata", {})
+                     .get("queryName"))
+    if dns_query:
+        observables.append({
+            "dataType": "domain",
+            "data": dns_query,
+            "message": "Sysmon DNS query (Event 22)",
+            "tags": ["wazuh-sysmon", "dns"],
+            "tlp": TLP_DEFAULT,
+            "ioc": False,  # DNS query không đương nhiên là IOC — analyst quyết định
+            "sighted": True,
+        })
+
+    return observables
+
+
+def _is_valid_ip(ip: str) -> bool:
+    """Kiểm tra IP hợp lệ, loại private range nếu cần."""
+    import ipaddress
+    try:
+        addr = ipaddress.ip_address(ip)
+        # Không tạo observable cho loopback/link-local
+        return not (addr.is_loopback or addr.is_link_local)
+    except ValueError:
+        return False
+
+
+def build_alert_title(alert: dict) -> str:
+    """Tạo title ngắn gọn, đủ context cho SOC analyst."""
+    rule = alert.get("rule", {})
+    agent = alert.get("agent", {})
+    level = rule.get("level", 0)
+    desc  = rule.get("description", "Unknown rule")
+    host  = agent.get("name", agent.get("ip", "unknown-host"))
+
+    # Level prefix để sort nhanh trong TheHive list
+    prefix = {
+        range(1,  8):  "[LOW]",
+        range(8,  11): "[MEDIUM]",
+        range(11, 13): "[HIGH]",
+        range(13, 16): "[CRITICAL]",
+    }
+    level_str = "[UNKNOWN]"
+    for r, p in prefix.items():
+        if level in r:
+            level_str = p
+            break
+
+    return f"{level_str} {desc} — {host}"
+
+
+def build_alert_description(alert: dict) -> str:
+    """
+    Markdown description cho TheHive Alert.
+    Bao gồm: rule info, agent info, raw data fields quan trọng, MITRE.
+    """
+    rule  = alert.get("rule", {})
+    agent = alert.get("agent", {})
+    data  = alert.get("data", {})
+    mitre = rule.get("mitre", {})
+
+    lines = [
+        "## Wazuh Alert Details",
+        "",
+        f"**Alert ID:** {alert.get('id', 'N/A')}",
+        f"**Timestamp:** {alert.get('@timestamp', alert.get('timestamp', 'N/A'))}",
+        "",
+        "### Rule",
+        f"- **ID:** {rule.get('id', 'N/A')}",
+        f"- **Level:** {rule.get('level', 'N/A')}",
+        f"- **Description:** {rule.get('description', 'N/A')}",
+        f"- **Groups:** {', '.join(rule.get('groups', []))}",
+        "",
+    ]
+
+    # MITRE block — chỉ thêm nếu có mapping
+    mitre_ids = mitre.get("id", [])
+    mitre_tactics = mitre.get("tactic", [])
+    if mitre_ids:
+        lines += [
+            "### MITRE ATT&CK",
+            f"- **Techniques:** {', '.join(mitre_ids)}",
+            f"- **Tactics:** {', '.join(mitre_tactics)}",
+            "",
+        ]
+
+    # Agent
+    lines += [
+        "### Agent (Endpoint)",
+        f"- **Name:** {agent.get('name', 'N/A')}",
+        f"- **IP:** {agent.get('ip', 'N/A')}",
+        f"- **ID:** {agent.get('id', 'N/A')}",
+        f"- **OS:** {agent.get('labels', {}).get('Localip', 'N/A')}",
+        "",
+    ]
+
+    # Key data fields — lấy những gì có
+    interesting_fields = {
+        "Source IP":      data.get("srcip"),
+        "Destination IP": data.get("dstip"),
+        "Program":        data.get("program_name"),
+        "Command":        data.get("command"),
+        "File Path":      alert.get("syscheck", {}).get("path"),
+        "File Event":     alert.get("syscheck", {}).get("event"),
+        "User":           data.get("dstuser") or data.get("srcuser"),
+    }
+    # Sysmon Windows fields
+    win_data = data.get("win", {}).get("eventdata", {})
+    if win_data:
+        interesting_fields.update({
+            "Process Image":   win_data.get("image"),
+            "Command Line":    win_data.get("commandLine"),
+            "Parent Image":    win_data.get("parentImage"),
+            "Destination IP":  win_data.get("destinationIp"),
+            "Destination Port":win_data.get("destinationPort"),
+            "Target File":     win_data.get("targetFilename"),
+            "Registry Key":    win_data.get("targetObject"),
+        })
+
+    non_empty = {k: v for k, v in interesting_fields.items() if v}
+    if non_empty:
+        lines.append("### Key Fields")
+        for k, v in non_empty.items():
+            lines.append(f"- **{k}:** `{v}`")
+        lines.append("")
+
+    # Raw full alert (collapsed, analyst có thể expand)
+    lines += [
+        "### Raw Alert (JSON)",
+        "```json",
+        json.dumps(alert, indent=2, default=str)[:4000],  # truncate nếu quá dài
+        "```",
+    ]
+
+    return "\n".join(lines)
+
+
+def build_thehive_alert_payload(alert: dict) -> dict:
+    """
+    Xây dựng payload POST /api/v1/alert theo TheHive 5 schema.
+    Tham chiếu: https://docs.strangebee.com/thehive/api-docs/#operation/Create%20alert
+    """
+    rule  = alert.get("rule", {})
+    agent = alert.get("agent", {})
+    level = int(rule.get("level", 0))
+
+    # Unique sourceRef: hash của alert_id để idempotent (không tạo duplicate)
+    alert_id = alert.get("id", str(alert.get("timestamp", "")))
+    source_ref = hashlib.md5(alert_id.encode()).hexdigest()[:16]
+
+    # Tags: base + rule groups + MITRE IDs
+    tags = BASE_TAGS.copy()
+    tags += [f"group:{g}" for g in rule.get("groups", [])]
+    tags += [f"mitre:{t}" for t in rule.get("mitre", {}).get("id", [])]
+    tags.append(f"agent:{agent.get('name', 'unknown')}")
+    tags.append(f"rule:{rule.get('id', '0')}")
+    tags = list(set(tags))  # dedup
+
+    payload = {
+        "type":        "wazuh-alert",
+        "source":      "wazuh-manager",
+        "sourceRef":   source_ref,
+        "title":       build_alert_title(alert),
+        "description": build_alert_description(alert),
+        "severity":    wazuh_level_to_severity(level),
+        "tlp":         wazuh_level_to_tlp(level),
+        "pap":         PAP_DEFAULT,
+        "tags":        tags,
+        "date":        _parse_timestamp(alert),
+        "observables": extract_iocs(alert),
+        # Custom fields — TheHive 5 custom fields phải tạo sẵn trong UI
+        # Nếu chưa tạo, comment block này ra
+       # "customFields": {
+        #    "wazuh-rule-level": {"integer": level},
+         #   "wazuh-rule-id":    {"string": str(rule.get("id", ""))},
+          #  "wazuh-agent-name": {"string": agent.get("name", "")},
+       # },
+    }
+    return payload
+
+
+def _parse_timestamp(alert: dict) -> int:
+    """
+    Convert Wazuh timestamp → TheHive epoch milliseconds.
+    Wazuh dùng ISO 8601 string hoặc epoch seconds.
+    """
+    ts = alert.get("@timestamp") or alert.get("timestamp")
+    if not ts:
+        return int(datetime.datetime.utcnow().timestamp() * 1000)
+    try:
+        # ISO 8601: "2026-05-20T10:00:01.000Z" hoặc "2026-05-20T10:00:01+0000"
+        ts_clean = ts.replace("Z", "+00:00")
+        dt = datetime.datetime.fromisoformat(ts_clean)
+        return int(dt.timestamp() * 1000)
+    except (ValueError, AttributeError):
+        # Fallback: epoch string
+        try:
+            return int(float(ts) * 1000)
+        except (ValueError, TypeError):
+            return int(datetime.datetime.utcnow().timestamp() * 1000)
+
+
+# ---------------------------------------------------------------------------
+# THEHIVE API CALLS
+# ---------------------------------------------------------------------------
+
+def _http_request(method: str, path: str, api_key: str,
+                   body: dict = None) -> tuple[int, dict]:
+    """
+    Minimal HTTP client dùng stdlib urllib (không cần requests).
+    Wazuh integration environment không đảm bảo có pip packages.
+    Trả về (status_code, response_dict).
+    """
+    url = f"{THEHIVE_URL}{path}"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type":  "application/json",
+        "Accept":        "application/json",
+    }
+
+    data_bytes = json.dumps(body).encode("utf-8") if body else None
+    req = urllib.request.Request(url, data=data_bytes,
+                                  headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            raw = resp.read().decode("utf-8")
+            return resp.status, json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode("utf-8")
+        log.error(f"HTTP {e.code} {method} {path}: {raw[:500]}")
+        try:
+            return e.code, json.loads(raw)
+        except json.JSONDecodeError:
+            return e.code, {"error": raw}
+    except urllib.error.URLError as e:
+        log.error(f"URL error {method} {path}: {e.reason}")
+        return 0, {"error": str(e.reason)}
+
+
+def create_alert(alert: dict, api_key: str) -> dict | None:
+    """
+    POST /api/v1/alert — tạo Alert trong TheHive.
+    Trả về alert dict từ TheHive (có id để promote), hoặc None nếu fail.
+    """
+    payload = build_thehive_alert_payload(alert)
+    log.info(f"Creating alert: sourceRef={payload['sourceRef']} "
+             f"severity={payload['severity']} title={payload['title'][:80]}")
+
+    status, resp = _http_request("POST", "/api/v1/alert", api_key, payload)
+
+    if status == 201:
+        alert_id = resp.get("_id", resp.get("id", "?"))
+        log.info(f"Alert created: id={alert_id}")
+        return resp
+    elif status == 207:
+        # 207 = alert đã tồn tại (idempotent qua sourceRef) — không phải lỗi
+        log.info(f"Alert already exists (sourceRef duplicate): {payload['sourceRef']}")
+        return resp
+    else:
+        log.error(f"Failed to create alert: status={status} resp={resp}")
+        return None
+
+
+def promote_alert_to_case(thehive_alert_id: str, alert: dict,
+                           api_key: str) -> dict | None:
+    """
+    POST /api/v1/alert/{id}/case — promote Alert → Case.
+    Chỉ gọi khi Wazuh level >= AUTO_PROMOTE_LEVEL.
+
+    TheHive 5 promote endpoint tự động:
+    - Copy title, description, tags từ Alert
+    - Link Alert vào Case
+    - Assign default responder nếu cấu hình
+
+    Trả về Case dict, hoặc None nếu fail.
+    """
+    rule  = alert.get("rule", {})
+    agent = alert.get("agent", {})
+    level = int(rule.get("level", 0))
+
+    # Case-specific fields: assignee, flag, tasks — tuỳ chỉnh theo SOC workflow
+    promote_payload = {
+        "title": build_alert_title(alert),
+        "severity": wazuh_level_to_severity(level),
+        "tlp": wazuh_level_to_tlp(level),
+        "pap": PAP_DEFAULT,
+        "tags": BASE_TAGS + [f"agent:{agent.get('name', 'unknown')}",
+                              f"rule:{rule.get('id', '0')}"],
+        # Tasks tự động tạo khi promote — analyst thấy ngay việc cần làm
+        "tasks": [
+            {
+                "title": "1. Xác minh alert — False Positive hay True Positive?",
+                "group": "Investigation",
+                "description": (
+                    f"Rule: {rule.get('description', 'N/A')}\n"
+                    f"Agent: {agent.get('name', 'N/A')} ({agent.get('ip', 'N/A')})\n"
+                    f"Level: {level}\n"
+                    "→ Kiểm tra context xung quanh alert trong Wazuh Dashboard"
+                ),
+            },
+            {
+                "title": "2. Thu thập IOC và chạy Cortex Analyzer",
+                "group": "Investigation",
+                "description": (
+                    "→ Chạy AbuseIPDB / VirusTotal analyzer cho IP và hash\n"
+                    "→ Kiểm tra MISP CDB list match"
+                ),
+            },
+            {
+                "title": "3. Containment — Quyết định block IP / isolate host",
+                "group": "Response",
+                "description": (
+                    "→ Nếu confirmed malicious: Approve Active Response trên Telegram\n"
+                    "→ Document hành động trong case timeline"
+                ),
+            },
+        ],
+    }
+
+    log.info(f"Promoting alert {thehive_alert_id} → Case (level={level})")
+    status, resp = _http_request(
+        "POST", f"/api/v1/alert/{thehive_alert_id}/case", api_key, promote_payload
+    )
+
+    if status in (200, 201):
+        case_id = resp.get("_id", resp.get("id", "?"))
+        case_num = resp.get("number", "?")
+        log.info(f"Case created: id={case_id} number=#{case_num}")
+        return resp
+    elif status == 400:
+        # Alert đã được promote trước đó
+        log.info(f"Alert {thehive_alert_id} already promoted to case")
+        return resp
+    else:
+        log.error(f"Failed to promote: status={status} resp={resp}")
+        return None
+
+
+def add_observables_to_case(case_id: str, observables: list[dict],
+                             api_key: str) -> None:
+    """
+    POST /api/v1/case/{id}/observable — thêm observable vào case đã tạo.
+    Gọi sau promote vì promote endpoint không tự copy observables.
+    """
+    for obs in observables:
+        status, resp = _http_request(
+            "POST", f"/api/v1/case/{case_id}/observable", api_key, obs
+        )
+        if status in (200, 201, 207):
+            log.info(f"Observable added to case {case_id}: "
+                     f"{obs['dataType']}={obs['data']}")
+        else:
+            log.warning(f"Failed to add observable {obs['data']}: "
+                        f"status={status}")
+
+
+# ---------------------------------------------------------------------------
+# MAIN ENTRY POINT
+# ---------------------------------------------------------------------------
+
+def main():
+    """
+    Wazuh integratord gọi script với:
+      argv[1] = path đến file JSON chứa alert
+      argv[2] = api_key (từ <api_key> trong ossec.conf)
+      argv[3] = hook_url (từ <hook_url> trong ossec.conf)
+
+    Script đọc file, process, exit 0 (success) hoặc exit 1 (failure).
+    Integratord sẽ log exit code vào /var/ossec/logs/ossec.log.
+    """
+    if len(sys.argv) < 4:
+        log.error(f"Usage: {sys.argv[0]} <alert_file> <api_key> <hook_url>")
+        sys.exit(1)
+
+    alert_file = sys.argv[1]
+    api_key    = sys.argv[2].strip() or THEHIVE_APIKEY
+    hook_url   = sys.argv[3].strip()
+
+    # Override URL từ argv nếu khác config
+    global THEHIVE_URL
+    if hook_url:
+        THEHIVE_URL = hook_url.rstrip("/")
+
+    if not api_key:
+        log.error("No API key provided. Set in ossec.conf <api_key> or THEHIVE_APIKEY constant.")
+        sys.exit(1)
+
+    # --- Đọc alert từ file ---
+    try:
+        with open(alert_file, "r", encoding="utf-8") as f:
+            alert = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        log.error(f"Failed to read alert file {alert_file}: {e}")
+        sys.exit(1)
+
+    rule  = alert.get("rule", {})
+    level = int(rule.get("level", 0))
+
+    log.info(f"Processing alert: id={alert.get('id','?')} "
+             f"rule={rule.get('id','?')} level={level} "
+             f"agent={alert.get('agent',{}).get('name','?')}")
+
+    # --- Tạo Alert trong TheHive ---
+    thehive_alert = create_alert(alert, api_key)
+    if thehive_alert is None:
+        log.error("create_alert failed — aborting")
+        sys.exit(1)
+
+    # TheHive 5 trả id trong "_id" hoặc "id" tuỳ version
+    thehive_alert_id = thehive_alert.get("_id") or thehive_alert.get("id")
+
+    # --- Auto-promote → Case nếu level >= ngưỡng ---
+    if level >= AUTO_PROMOTE_LEVEL and thehive_alert_id:
+        case = promote_alert_to_case(thehive_alert_id, alert, api_key)
+        if case:
+            case_id = case.get("_id") or case.get("id")
+            # Thêm observables vào case (promote không copy observables)
+            iocs = extract_iocs(alert)
+            if iocs and case_id:
+                add_observables_to_case(case_id, iocs, api_key)
+
+    log.info(f"Done: alert processed successfully")
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()
