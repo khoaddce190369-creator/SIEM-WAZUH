@@ -1,0 +1,820 @@
+#!/usr/bin/env python3
+# ============================================================
+# FILE: custom-telegram (Phiên bản Monolithic tích hợp Threat Intel + SOAR)
+# Cre: Thái & Khoa - SOC Team
+# PATCHED: bảo mật secrets, escape HTML, fail-safe thực thi ở code,
+#          khóa file chống race-condition, callback_data gọn & an toàn,
+#          retry + timeout hợp lý, validate schema AI output.
+# PATCHED v2: gộp logic auto-block AbuseIPDB (score cao -> chặn ngay, score
+#          thấp/trung bình -> qua Telegram cho analyst duyệt) thay cho script
+#          custom-abuseipdb.py riêng biệt — 1 nguồn quyết định, tránh gọi
+#          AbuseIPDB trùng lặp và tránh 2 nơi tự ra quyết định xung đột nhau.
+# PATCHED v3 (Thái, review với Claude):
+#   - Thiết kế lại giao diện Telegram 4-block: bỏ ký tự vẽ cây ASCII (├└, dễ vỡ
+#     dòng trên mobile), thay bằng emoji + nhóm nội dung theo mức độ ưu tiên đọc.
+#     Raw log giờ nằm trong <tg-spoiler> (ẩn mặc định, bấm để xem) đỡ rối mắt.
+#   - Thêm bảng tra cứu tên kỹ thuật MITRE (MITRE_TECHNIQUE_NAMES) — hiện cả tên
+#     tiếng Anh kỹ thuật bên cạnh mã T-number, đỡ phải tra cứu thủ công.
+#   - Làm giàu file JSON export (TN3): thêm rule_id, rule_level, mitre_techniques_detail
+#     (mã + tên) để analyst đọc report không cần mở lại Wazuh Dashboard đối chiếu.
+#   - Chuyển AI từ Ollama (llama3.1 local) sang Gemini API (gemini-2.5-flash-lite),
+#     dùng chung gemini_client.py với TN5/TN6 — đồng bộ toàn hệ thống theo yêu cầu
+#     Khoa. Tách system prompt (persona + rule) ra khỏi user prompt (alert + intel
+#     data), và dùng response_schema ép cấu trúc JSON chặt — bỏ được hack tự cắt
+#     markdown fence ```json thủ công như bản Ollama cũ.
+# ============================================================
+
+import sys
+import os
+import re
+import json
+import glob
+import time
+import html
+import fcntl
+import requests
+import logging
+import ipaddress
+from datetime import datetime, timezone, timedelta
+from jsonschema import validate, ValidationError
+
+from gemini_client import call_gemini_json
+
+# ─────────────────────────────────────────────────────────────
+# PHẦN 1: CẤU HÌNH HỆ THỐNG
+# ─────────────────────────────────────────────────────────────
+REPORTS_DIR = "/var/ossec/reports/incidents"
+
+# Cấu hình model Gemini nằm trong gemini_client.py (dùng chung với TN5/TN6).
+
+# LƯU Ý: các giá trị dưới đây là credentials thật, đang hardcode theo yêu cầu —
+# chưa chuyển sang biến môi trường.
+TELEGRAM_BOT_TOKEN = "8120297484:AAHrRZ6HXMQxGrHCqiufUpmVGBbE0l5N9JA" 
+TELEGRAM_CHAT_ID = "-1003916483167"
+ABUSEIPDB_API_KEY = "687b3bc95eb1919283fd3f5223661f7a1601b7e545db577ea302a3ce27acb0dc2d7dd7338c1e9456"
+
+REQUEST_TIMEOUT_ABUSEIPDB = 6
+REQUEST_TIMEOUT_TELEGRAM = 10
+MAX_RETRIES = 2
+RETRY_BACKOFF_SECONDS = 1.5
+
+TELEGRAM_MAX_LEN = 4096
+VALID_ACTIONS = {"block_ip", "isolate-machine", "monitor"}
+VALID_SEVERITIES = {"Critical", "High", "Medium", "Low", "Unknown", "N/A"}
+
+# Nhãn tiếng Việt cho action — hiển thị trên Telegram, để đồng bộ ngôn ngữ với
+# phần còn lại của message (bản cũ lẫn lộn "BLOCK IP"/"Chặn"/"Isolate" rất rối).
+ACTION_LABELS_VI = {
+    "block_ip": "Chặn IP",
+    "isolate-machine": "Cô lập máy",
+    "monitor": "Theo dõi",
+}
+
+# Tra cứu tên kỹ thuật MITRE ATT&CK phổ biến trong hệ thống — hiện kèm mã T-number
+# để analyst không cần tra cứu thủ công. Thêm dần khi gặp mã mới chưa có trong bảng.
+MITRE_TECHNIQUE_NAMES = {
+    "T1059": "Command and Scripting Interpreter",
+    "T1110": "Brute Force",
+    "T1550": "Use Alternate Authentication Material",
+    "T1021": "Remote Services",
+    "T1047": "Windows Management Instrumentation",
+    "T1053": "Scheduled Task/Job",
+    "T1547": "Boot or Logon Autostart Execution",
+    "T1070": "Indicator Removal",
+    "T1218": "System Binary Proxy Execution",
+    "T1048": "Exfiltration Over Alternative Protocol",
+    "T1560": "Archive Collected Data",
+}
+
+
+def format_mitre_techniques(technique_ids):
+    """Trả về list string 'T1059 (Command and Scripting Interpreter)' để analyst
+    không cần tra cứu thủ công mã MITRE. Nếu chưa có tên trong bảng tra cứu, chỉ
+    hiện mã gốc — KHÔNG bịa tên."""
+    result = []
+    for tid in technique_ids:
+        name = MITRE_TECHNIQUE_NAMES.get(tid)
+        result.append(f"{tid} ({name})" if name else tid)
+    return result
+
+
+# ─────────────────────────────────────────────────────────────
+# AUTO-BLOCK: gộp logic từ custom-abuseipdb.py vào đây (nguồn quyết định duy nhất)
+# ─────────────────────────────────────────────────────────────
+# IP có score >= ngưỡng này VÀ đủ số report tối thiểu sẽ bị block NGAY LẬP TỨC,
+# không qua bước Approve/Reject của analyst. Dưới ngưỡng này thì vẫn đẩy về
+# flow duyệt thủ công như cũ. Tinh chỉnh 2 giá trị này theo khẩu vị rủi ro của team
+# (giá trị mặc định dưới đây là mức "high confidence" tương đối an toàn để bắt đầu).
+AUTO_BLOCK_SCORE_THRESHOLD = 90
+AUTO_BLOCK_MIN_REPORTS = 3
+
+# Danh sách IP/CIDR public KHÔNG BAO GIỜ được tự động block, dù AbuseIPDB báo điểm
+# cao (tránh false-positive tự chặn nhầm hạ tầng của chính mình: NAT gateway, VPN,
+# đối tác, dịch vụ giám sát bên thứ ba...). Điền IP/CIDR thật của công ty vào đây.
+INTERNAL_ALLOWLIST_CIDRS = [
+    # "203.0.113.10/32",   # ví dụ: NAT gateway văn phòng
+    # "198.51.100.0/24",   # ví dụ: dải IP đối tác/nhà cung cấp tin cậy
+]
+
+# File log dùng để trigger active-response firewall-drop qua rule 100050 (Wazuh
+# đọc file này như một localfile json). Giữ đúng path + schema JSON như
+# custom-abuseipdb.py cũ để không phải sửa lại rule/decoder trên Wazuh manager.
+ACTIVE_RESPONSES_LOG = "/var/ossec/logs/active-responses.log"
+
+VN_TZ = timezone(timedelta(hours=7))
+RAW_LOG_MAX_LEN = 300
+
+logging.basicConfig(
+    filename="/var/ossec/logs/ai_fallback.log",
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] custom-telegram: %(message)s",
+)
+
+
+# ─────────────────────────────────────────────────────────────
+# PHẦN 2: CÁC HÀM BỔ TRỢ KỸ THUẬT
+# ─────────────────────────────────────────────────────────────
+def is_public_ip(ip_str):
+    """Kiểm tra IP Public hợp lệ, loại trừ IP LAN/Loopback"""
+    try:
+        ip = ipaddress.ip_address(ip_str)
+        return ip.is_global
+    except (ValueError, TypeError):
+        return False
+
+
+def request_with_retry(method, url, **kwargs):
+    """
+    FIX #7: Retry có backoff cho các API call quan trọng (AbuseIPDB, Telegram).
+    Không retry vô hạn để tránh làm chậm pipeline alert.
+    """
+    last_exc = None
+    for attempt in range(1, MAX_RETRIES + 2):  # thử lần đầu + MAX_RETRIES lần retry
+        try:
+            resp = requests.request(method, url, **kwargs)
+            return resp
+        except requests.exceptions.RequestException as e:
+            last_exc = e
+            logging.warning(
+                f"Request tới {url} lỗi (lần {attempt}): {e}. "
+                f"{'Thử lại...' if attempt <= MAX_RETRIES else 'Bỏ cuộc.'}"
+            )
+            if attempt <= MAX_RETRIES:
+                time.sleep(RETRY_BACKOFF_SECONDS * attempt)
+    logging.error(f"Request tới {url} thất bại sau {MAX_RETRIES + 1} lần thử: {last_exc}")
+    return None
+
+
+def get_abuseipdb_info(ip):
+    """Gọi API AbuseIPDB trực tiếp trên luồng để lấy Threat Intel"""
+    if not ip or not is_public_ip(ip):
+        return {"status": "internal", "verdict": "Không có dữ liệu threat intelligence (IP nội bộ hoặc không xác định)."}
+
+    if not ABUSEIPDB_API_KEY:
+        logging.error("Thiếu ABUSEIPDB_API_KEY trong biến môi trường.")
+        return {"status": "error", "verdict": "Không có dữ liệu threat intelligence (Thiếu cấu hình API key)."}
+
+    url = "https://api.abuseipdb.com/api/v2/check"
+    querystring = {"ipAddress": ip, "maxAgeInDays": "90"}
+    headers = {"Accept": "application/json", "Key": ABUSEIPDB_API_KEY}
+
+    response = request_with_retry(
+        "GET", url, headers=headers, params=querystring, timeout=REQUEST_TIMEOUT_ABUSEIPDB
+    )
+    if response is not None and response.status_code == 200:
+        data = response.json().get("data", {})
+        return {
+            "status": "success",
+            "score": data.get("abuseConfidenceScore", 0),
+            "total_reports": data.get("totalReports", 0),
+            "is_tor": data.get("isTor", False),
+            "isp": data.get("isp", "Unknown"),
+            "usageType": data.get("usageType", "Unknown"),
+            "country": data.get("countryCode", "Unknown"),
+            "verdict": (
+                f"AbuseIPDB Score: {data.get('abuseConfidenceScore', 0)}%. "
+                f"Tổng số báo cáo: {data.get('totalReports', 0)}. "
+                f"Quốc gia: {data.get('countryCode', 'Unknown')}. "
+                f"ISP: {data.get('isp', 'Unknown')}."
+            ),
+        }
+
+    return {"status": "error", "verdict": "Không có dữ liệu threat intelligence (Lỗi gọi API)."}
+
+
+def get_next_incident_id() -> str:
+    """
+    FIX #4: Tự động sinh mã Incident ID dạng INC-YYYYMMDD-NNNN, có khóa file
+    (fcntl.flock) để tránh race-condition khi nhiều alert bắn gần như đồng thời.
+    """
+    os.makedirs(REPORTS_DIR, exist_ok=True)
+    lock_path = os.path.join(REPORTS_DIR, ".incident_id.lock")
+
+    try:
+        with open(lock_path, "a+") as lockfile:
+            fcntl.flock(lockfile, fcntl.LOCK_EX)
+            try:
+                today_str = datetime.now().strftime("%Y%m%d")
+                pattern = os.path.join(REPORTS_DIR, f"INC-{today_str}-*.json")
+                existing_files = glob.glob(pattern)
+
+                max_num = 0
+                for f in existing_files:
+                    try:
+                        base = os.path.basename(f)
+                        num_part = base.split("-")[2].split(".")[0]
+                        max_num = max(max_num, int(num_part))
+                    except (ValueError, IndexError):
+                        continue
+                return f"INC-{today_str}-{(max_num + 1):04d}"
+            finally:
+                fcntl.flock(lockfile, fcntl.LOCK_UN)
+    except Exception as e:
+        logging.error(f"Lỗi sinh ID sự cố: {e}")
+        # Fallback: dùng timestamp microsecond để tối thiểu tránh trùng ID
+        return f"INC-{datetime.now().strftime('%Y%m%d-%H%M%S%f')}"
+
+
+def enforce_failsafe_actions(actions, attacker_ip):
+    """
+    FIX #3: Enforce lại rule fail-safe ở CODE, không tin tuyệt đối vào output của AI.
+    Không bao giờ để lệnh block_ip lọt qua cho IP nội bộ / N/A.
+    """
+    if not isinstance(actions, list):
+        actions = [actions] if actions else []
+
+    # Whitelist: loại action lạ mà AI có thể "sáng tạo" ra
+    actions = [a for a in actions if a in VALID_ACTIONS]
+    if not actions:
+        actions = ["monitor"]
+
+    if "block_ip" in actions and not is_public_ip(attacker_ip):
+        logging.warning(
+            f"Fail-safe kích hoạt: AI đề xuất block_ip cho IP không hợp lệ/nội bộ "
+            f"'{attacker_ip}'. Ép về isolate-machine."
+        )
+        actions = ["isolate-machine" if a == "block_ip" else a for a in actions]
+        # loại trùng, giữ thứ tự
+        seen = set()
+        actions = [a for a in actions if not (a in seen or seen.add(a))]
+
+    return actions
+
+
+def safe_severity(value):
+    return value if value in VALID_SEVERITIES else "Unknown"
+
+
+def is_allowlisted(ip_str):
+    """IP nằm trong INTERNAL_ALLOWLIST_CIDRS thì không bao giờ bị auto-block."""
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except (ValueError, TypeError):
+        return False
+    for cidr in INTERNAL_ALLOWLIST_CIDRS:
+        try:
+            if ip in ipaddress.ip_network(cidr, strict=False):
+                return True
+        except ValueError:
+            logging.warning(f"CIDR không hợp lệ trong INTERNAL_ALLOWLIST_CIDRS: {cidr}")
+    return False
+
+
+def should_auto_block(intel_data, src_ip):
+    """
+    Quyết định auto-block: score đủ cao + đủ report tối thiểu + IP public thật
+    + không nằm trong allowlist. Đây là điều kiện DUY NHẤT quyết định block
+    thẳng tay không qua người duyệt — cố tình để riêng thành 1 hàm để dễ audit/test.
+    """
+    if intel_data.get("status") != "success":
+        return False
+    if not is_public_ip(src_ip):
+        return False
+    if is_allowlisted(src_ip):
+        logging.info(f"IP {src_ip} nằm trong allowlist nội bộ, bỏ qua auto-block.")
+        return False
+    score = intel_data.get("score", 0)
+    total_reports = intel_data.get("total_reports", 0)
+    return score >= AUTO_BLOCK_SCORE_THRESHOLD and total_reports >= AUTO_BLOCK_MIN_REPORTS
+
+
+def trigger_active_response_block(src_ip, intel_data, incident_id):
+    """
+    Kích hoạt block NGAY LẬP TỨC bằng cách ghi 1 dòng JSON vào active-responses.log,
+    tái dùng đúng cơ chế mà custom-abuseipdb.py (cũ) dùng để trigger rule 100050
+    trên Wazuh manager → active-response firewall-drop. Nhờ giữ đúng schema JSON,
+    không cần sửa lại rule/decoder đã có sẵn trên manager.
+    """
+    log_output = {
+        "integration": "abuseipdb",
+        "ip": src_ip,
+        "score": intel_data.get("score", 0),
+        "country": intel_data.get("country", "Unknown"),
+        "usageType": intel_data.get("usageType", "Unknown"),
+        "description": "Phat hien IP doc hai tu AbuseIPDB",
+        "incident_id": incident_id,
+    }
+    try:
+        with open(ACTIVE_RESPONSES_LOG, "a") as ar_log:
+            ar_log.write(json.dumps(log_output) + "\n")
+        logging.info(f"Auto-block kích hoạt cho IP {src_ip} (score={intel_data.get('score')}), incident {incident_id}")
+        return True
+    except Exception as e:
+        logging.error(f"Không thể ghi active-responses.log để trigger block cho {src_ip}: {e}")
+        return False
+
+
+def truncate_telegram_text(text, limit=TELEGRAM_MAX_LEN):
+    """FIX #8: Tránh Telegram từ chối message do vượt quá 4096 ký tự."""
+    if len(text) <= limit:
+        return text
+    cut = text[: limit - 30].rstrip()
+    return cut + "\n\n[...nội dung đã bị cắt bớt...]"
+
+
+def format_timestamp_vn(ts_raw):
+    """Convert timestamp Wazuh (thường là UTC) sang giờ VN (UTC+7) để SOC đọc
+    khỏi nhầm giờ. Nếu parse lỗi, trả về giá trị gốc kèm ghi chú thay vì crash."""
+    try:
+        ts = ts_raw.strip()
+        if ts.endswith("Z"):
+            ts = ts[:-1] + "+00:00"
+        else:
+            # Wazuh thường xuất offset dạng "+0000"/"-0700" (không có dấu ":"),
+            # nhưng datetime.fromisoformat() cần "+00:00" mới parse được.
+            m = re.match(r"^(.*[+-]\d{2})(\d{2})$", ts)
+            if m:
+                ts = f"{m.group(1)}:{m.group(2)}"
+        dt = datetime.fromisoformat(ts)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        dt_vn = dt.astimezone(VN_TZ)
+        return dt_vn.strftime("%Y-%m-%d %H:%M:%S") + " (giờ VN, UTC+7)"
+    except (ValueError, TypeError):
+        return f"{ts_raw} (không parse được, giá trị gốc)"
+
+
+def get_raw_log_excerpt(alert):
+    """Trích đoạn log gốc (full_log) để SOC verify nhanh mà không cần SSH vào server."""
+    raw = (alert.get("full_log") or "").strip()
+    if not raw:
+        return None
+    if len(raw) > RAW_LOG_MAX_LEN:
+        raw = raw[:RAW_LOG_MAX_LEN].rstrip() + "..."
+    return raw
+
+
+def extract_ioc_hashes(alert):
+    """Lấy hash file từ sự kiện FIM (syscheck) nếu có — ưu tiên sha256 > sha1 > md5."""
+    syscheck = alert.get("syscheck", {}) or {}
+    for key in ("sha256_after", "sha1_after", "md5_after"):
+        val = syscheck.get(key)
+        if val:
+            return [val]
+    return []
+
+
+def get_network_context(alert):
+    """Lấy protocol/port từ alert.data nếu có, giúp phân biệt loại tấn công
+    (vd: SSH brute-force vs web attack) mà không cần đọc raw log."""
+    data = alert.get("data", {}) or {}
+    protocol = data.get("protocol")
+    srcport = data.get("srcport") or data.get("src_port")
+    dstport = data.get("dstport") or data.get("dest_port")
+
+    parts = []
+    if protocol:
+        parts.append(str(protocol).upper())
+    if srcport:
+        parts.append(f"src_port:{srcport}")
+    if dstport:
+        parts.append(f"dst_port:{dstport}")
+    return " | ".join(parts) if parts else None
+
+
+# ─────────────────────────────────────────────────────────────
+# PHẦN 2b: PROMPT + SCHEMA CHO GEMINI (thay Ollama)
+# ─────────────────────────────────────────────────────────────
+# System prompt tách riêng khỏi dữ liệu động (alert + threat intel) — đúng chuẩn
+# thiết kế đã áp dụng cho TN5/TN6, thay vì nhét chung 1 khối string như bản Ollama cũ.
+SYSTEM_PROMPT_INCIDENT_ANALYSIS_V1 = """You are a Senior L3 Cyber Security Analyst operating within an automated SOAR system.
+Analyze the raw security alert log alongside its fetched real-time threat intelligence
+data provided in the user message, and respond with structured JSON only.
+
+CRITICAL COMPLIANCE RULES FOR OUTPUT:
+1. Respond with a single, highly structured JSON object matching the required schema.
+   No introductory text, no Markdown code fences, no conversational filler — raw JSON only.
+2. "attack_summary" MUST be in English, descriptive, and mention specific entities found in
+   the log (user accounts, processes, ports, file paths). NEVER use generic phrases like
+   "a suspicious activity was detected".
+3. "threat_verdict" MUST be in Vietnamese. If the threat intel is internal/empty, write
+   exactly: "Không có dữ liệu threat intelligence." If there is real data, summarize the
+   AbuseIPDB score and reports faithfully — do NOT invent numbers.
+4. FAIL-SAFE SOAR RULE for "recommended_actions":
+   - If the Attacker IP is "N/A", an internal LAN IP (192.168.x.x, 10.x.x.x, 172.x.x.x), or
+     the incident is local (system configuration change, FIM/rootcheck), the action array
+     MUST ONLY contain "isolate-machine" or "monitor". NEVER output "block_ip" for internal
+     infrastructure.
+   - If the Attacker IP is a public internet IP with a high AbuseIPDB score, you may output
+     "block_ip".
+"""
+
+# Ép cấu trúc JSON output chặt qua Gemini response_schema — thay cho hack tự cắt
+# markdown fence ```json thủ công của bản Ollama cũ (raw_text.startswith("```")...).
+INCIDENT_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "severity": {"type": "string", "enum": ["Critical", "High", "Medium", "Low", "Unknown", "N/A"]},
+        "affected_user": {"type": "string"},
+        "attack_summary": {"type": "string"},
+        "mitre_techniques": {"type": "array", "items": {"type": "string"}},
+        "recommended_actions": {
+            "type": "array",
+            "items": {"type": "string", "enum": ["block_ip", "isolate-machine", "monitor"]},
+        },
+    },
+    "required": ["severity", "affected_user", "attack_summary", "mitre_techniques", "recommended_actions"],
+}
+
+
+def build_incident_user_prompt(alert, intel_data):
+    return f"""[RAW WAZUH ALERT]
+{json.dumps(alert, indent=2)}
+
+[REAL-TIME THREAT INTEL FROM ABUSEIPDB]
+{json.dumps(intel_data, indent=2)}"""
+
+
+# ─────────────────────────────────────────────────────────────
+# PHẦN 3: LÕI XỬ LÝ CHÍNH (MAIN ACTION)
+# ─────────────────────────────────────────────────────────────
+def main():
+    if len(sys.argv) < 2:
+        return
+
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        logging.error("Thiếu TELEGRAM_BOT_TOKEN hoặc TELEGRAM_CHAT_ID trong biến môi trường. Dừng xử lý.")
+        return
+
+    alert_file_path = sys.argv[1]
+
+    try:
+        with open(alert_file_path, "r", encoding="utf-8") as f:
+            alert = json.load(f)
+    except Exception as e:
+        logging.error(f"Không thể đọc file alert của Wazuh: {e}")
+        return
+
+    # 1. Thu thập bối cảnh cơ bản từ log
+    rule_id = alert.get("rule", {}).get("id", "Unknown")
+    rule_level = alert.get("rule", {}).get("level", 0)
+    description = alert.get("rule", {}).get("description", "No description")
+    hostname = alert.get("agent", {}).get("name", "Unknown Host")
+    victim_ip = alert.get("agent", {}).get("ip", "Unknown IP")
+    alert_id = alert.get("id", "Unknown_ID")
+    timestamp = alert.get("timestamp", datetime.utcnow().isoformat())
+
+    # Tìm IP kẻ tấn công (srcip)
+    src_ip = alert.get("data", {}).get("srcip") or alert.get("srcip") or "N/A"
+
+    # Làm giàu thêm ngữ cảnh cho SOC đọc nhanh mà không cần SSH vào server
+    raw_log_excerpt = get_raw_log_excerpt(alert)
+    network_context = get_network_context(alert)
+    ioc_hashes = extract_ioc_hashes(alert)
+
+    # 2. Thực hiện làm giàu dữ liệu Threat Intel ngay lập tức (On-the-fly Enrichment)
+    intel_data = get_abuseipdb_info(src_ip)
+
+    # 3. Gọi Gemini để phân tích incident (thay cho Llama 3.1 qua Ollama)
+    ai_json = None
+    try:
+        ai_json = call_gemini_json(
+            SYSTEM_PROMPT_INCIDENT_ANALYSIS_V1,
+            build_incident_user_prompt(alert, intel_data),
+            temperature=0.2,
+            response_schema=INCIDENT_RESPONSE_SCHEMA,
+        )
+        if not isinstance(ai_json, dict):
+            logging.error("Gemini trả JSON hợp lệ nhưng không phải object. Dùng fallback.")
+            ai_json = None
+    except Exception as e:
+        logging.error(f"Lỗi gọi Gemini hoặc parse JSON: {e}")
+        ai_json = None
+
+    # Fallback dự phòng nếu AI chết máy hoặc phản hồi sai định dạng
+    if not ai_json:
+        ai_json = {
+            "severity": "High" if int(rule_level) >= 10 else "Medium",
+            "affected_user": "N/A",
+            "attack_summary": f"Security event triggered by rule {rule_id}: {description}",
+            "mitre_techniques": ["T1059"],
+            "recommended_actions": ["monitor"],
+        }
+
+    # 4b. FIX #3 + #6: validate & enforce lại toàn bộ output AI trước khi dùng
+    severity = safe_severity(ai_json.get("severity", "Unknown"))
+    mitre_techniques = ai_json.get("mitre_techniques", [])
+    if not isinstance(mitre_techniques, list):
+        mitre_techniques = []
+    recommended_actions = enforce_failsafe_actions(
+        ai_json.get("recommended_actions", ["monitor"]), src_ip
+    )
+
+    # 4c. AUTO-BLOCK: nếu AbuseIPDB score đủ cao + đủ report, ép action = block_ip
+    # và đánh dấu để xử lý auto-execute (không chờ Approve) ở bước dưới.
+    auto_block = should_auto_block(intel_data, src_ip)
+    if auto_block:
+        recommended_actions = ["block_ip"]
+
+    # 5. Khớp dữ liệu sinh Incident ID và lưu file JSON Nghiệm Thu
+    incident_id = get_next_incident_id()
+
+    final_report = {
+        "incident_id": incident_id,
+        "rule_id": str(rule_id),
+        "rule_level": rule_level,
+        "severity": severity,
+        "patient_zero": {"hostname": hostname, "ip": victim_ip},
+        "affected_user": ai_json.get("affected_user", "N/A"),
+        "attack_summary": ai_json.get("attack_summary", ""),
+        "ioc": {"hash": ioc_hashes, "ip": [src_ip] if src_ip != "N/A" else [], "domain": []},
+        "threat_verdict": intel_data["verdict"],
+        "mitre_techniques": mitre_techniques,
+        # Thêm tên kỹ thuật kèm mã — analyst đọc report không cần tra cứu MITRE riêng.
+        "mitre_techniques_detail": [
+            {"id": t, "name": MITRE_TECHNIQUE_NAMES.get(t, "Không xác định")}
+            for t in mitre_techniques
+        ],
+        "timeline": [f"{timestamp} - {description} from IP {src_ip}"],
+        "recommended_actions": recommended_actions,
+        # FIX #5: lưu sẵn action + target trong file report để backend đọc lại
+        # thay vì phải nhét hết vào callback_data (giới hạn 64 byte của Telegram).
+        "pending_action": {
+            "action": recommended_actions[0] if recommended_actions else "monitor",
+            "target_ip": src_ip if (recommended_actions and recommended_actions[0] == "block_ip") else victim_ip,
+            "alert_id": alert_id,
+            # "auto_executed": đã tự động chặn rồi, analyst chỉ cần biết, không cần bấm gì.
+            # "pending": cần analyst bấm Approve thì soar_backend.py mới thực thi.
+            "status": "auto_executed" if auto_block else "pending",
+        },
+    }
+
+    # 5b. Nếu đạt điều kiện auto-block: kích hoạt chặn NGAY, trước khi gửi Telegram,
+    # để phần thông báo bên dưới phản ánh đúng thực tế (đã chặn hay đang chờ duyệt).
+    if auto_block:
+        blocked_ok = trigger_active_response_block(src_ip, intel_data, incident_id)
+        if not blocked_ok:
+            # Ghi log để không im lặng nếu lỡ không kích hoạt được — vẫn tiếp tục
+            # gửi Telegram để analyst biết mà xử lý tay.            
+           logging.error(f"Auto-block THẤT BẠI cho {src_ip}, incident {incident_id} — cần xử lý thủ công.")
+
+    # =====================================================================
+    # LỚP ÁO GIÁP SCHEMA VALIDATION (CỦA KHOA)
+    # =====================================================================
+    REPORT_SCHEMA = {
+        "type": "object",
+        "properties": {
+            "incident_id": {"type": "string"},
+            "rule_id": {"type": "string"},
+            "rule_level": {"type": ["integer", "string", "number"]},
+            "severity": {"type": "string", "enum": ["Critical", "High", "Medium", "Low", "Unknown", "N/A"]},
+            "patient_zero": {
+                "type": "object",
+                "properties": {"hostname": {"type": "string"}, "ip": {"type": "string"}},
+                "required": ["hostname", "ip"],
+                "additionalProperties": False
+            },
+            "affected_user": {"type": "string"},
+            "attack_summary": {"type": "string"},
+            "ioc": {
+                "type": "object",
+                "properties": {
+                    "hash": {"type": "array", "items": {"type": "string"}},
+                    "ip": {"type": "array", "items": {"type": "string"}},
+                    "domain": {"type": "array", "items": {"type": "string"}}
+                },
+                "required": ["hash", "ip", "domain"],
+                "additionalProperties": False
+            },
+            "threat_verdict": {"type": "string"},
+            "mitre_techniques": {"type": "array", "items": {"type": "string"}},
+            "mitre_techniques_detail": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"id": {"type": "string"}, "name": {"type": "string"}},
+                    "required": ["id", "name"],
+                    "additionalProperties": False
+                }
+            },
+            "timeline": {"type": "array", "items": {"type": "string"}},
+            "recommended_actions": {"type": "array", "items": {"type": "string"}},
+            # UPDATE: Bổ sung trường pending_action của SOAR Backend để Schema không chửi
+            "pending_action": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string"},
+                    "target_ip": {"type": "string"},
+                    "alert_id": {"type": "string"},
+                    "status": {"type": "string"},
+                    "resolution": {"type": "string"},
+                    "resolved_by": {"type": "string"}
+                },
+                "required": ["action", "target_ip", "alert_id", "status"],
+                "additionalProperties": False
+            }
+        },
+        "required": [
+            "incident_id", "rule_id", "rule_level", "severity", "patient_zero", "affected_user",
+            "attack_summary", "ioc", "threat_verdict", "mitre_techniques", "mitre_techniques_detail",
+            "timeline", "recommended_actions", "pending_action"
+        ],
+        "additionalProperties": False
+    }
+
+    try:
+        validate(instance=final_report, schema=REPORT_SCHEMA)
+    except ValidationError as e:
+        logging.error(f"[TN3] Schema validation failed for {incident_id}: {e.message}")
+    # =====================================================================
+
+    # Ghi tệp cứng để phục vụ script validate_ai_json.py của Leader
+    try:
+        report_path = os.path.join(REPORTS_DIR, f"{incident_id}.json")
+        with open(report_path, "w", encoding="utf-8") as rf:
+            json.dump(final_report, rf, indent=2, ensure_ascii=False)
+    except Exception as e:
+        logging.error(f"Không thể lưu file incident report: {e}")
+
+    # 6. Thiết kế giao diện Telegram — bố cục mới: bỏ ký tự vẽ cây ASCII (dễ vỡ
+    # dòng trên mobile), thay bằng emoji + nhóm nội dung theo thứ tự ưu tiên đọc:
+    # mức độ nghiêm trọng -> host/user/thời gian -> diễn biến -> MITRE -> threat
+    # intel -> hành động đề xuất -> raw log (ẩn trong spoiler, không bắt buộc đọc).
+    severity_emoji = {
+        "Critical": "🔴", "High": "🟠", "Medium": "🟡",
+        "Low": "🟢", "Unknown": "⚪", "N/A": "⚪",
+    }.get(final_report["severity"], "⚪")
+
+    mitre_display_list = format_mitre_techniques(final_report["mitre_techniques"])
+    mitre_str = ", ".join(mitre_display_list) if mitre_display_list else "N/A"
+    action_vi = ", ".join(ACTION_LABELS_VI.get(a, a) for a in final_report["recommended_actions"])
+
+    # FIX #2: escape mọi giá trị nội suy vào HTML để tránh vỡ parse_mode="HTML"
+    # hoặc bị chèn tag từ dữ liệu log không đáng tin cậy.
+    e_description = html.escape(str(description))
+    e_hostname = html.escape(str(hostname))
+    e_victim_ip = html.escape(str(victim_ip))
+    e_timestamp = html.escape(format_timestamp_vn(str(timestamp)))
+    e_summary = html.escape(str(final_report["attack_summary"]))
+    e_affected_user = html.escape(str(final_report["affected_user"]))
+    e_src_ip = html.escape(str(src_ip))
+    e_verdict = html.escape(str(final_report["threat_verdict"]))
+    e_mitre = html.escape(mitre_str)
+    e_action_vi = html.escape(action_vi)
+    e_raw_log = html.escape(raw_log_excerpt) if raw_log_excerpt else None
+    e_network = html.escape(network_context) if network_context else None
+    e_is_tor = (
+        ("Có ⚠️" if intel_data.get("is_tor") else "Không")
+        if intel_data.get("status") == "success"
+        else "N/A (chưa tra cứu được)"
+    )
+    e_usage_type = (
+        html.escape(str(intel_data.get("usageType", "Unknown")))
+        if intel_data.get("status") == "success"
+        else "N/A"
+    )
+    e_hashes = html.escape(", ".join(final_report["ioc"]["hash"])) if final_report["ioc"]["hash"] else None
+
+    if auto_block:
+        header_line = f"<b>ĐÃ TỰ ĐỘNG CHẶN</b> — Rule Level {rule_level}"
+    else:
+        header_line = f"{severity_emoji} <b>{html.escape(final_report['severity'].upper())}</b> — Rule Level {rule_level}"
+
+    lines = [
+        header_line,
+        e_description,
+        "",
+        f"<b>Host:</b> {e_hostname} (<code>{e_victim_ip}</code>)",
+        f"<b>User:</b> {e_affected_user}",
+        f"<b>Thời gian:</b> {e_timestamp}",
+    ]
+    if e_network:
+        lines.append(f"<b>Network:</b> {e_network}")
+    lines += [
+        "",
+        f"<b>Diễn biến:</b> {e_summary}",
+        "",
+        f"<b>MITRE ATT&amp;CK:</b> {e_mitre}",
+        "",
+        f"<b>Threat Intel:</b> {e_verdict}",
+    ]
+    if intel_data.get("status") == "success":
+        lines.append(f"    Tor: {e_is_tor} | Usage type: {e_usage_type}")
+    if e_hashes:
+        lines.append(f"<b>IOC Hash:</b> <code>{e_hashes}</code>")
+
+    status_line = (
+        f"Đã tự động chặn (AbuseIPDB score ≥ {AUTO_BLOCK_SCORE_THRESHOLD})"
+        if auto_block else "⏳ Chờ analyst duyệt"
+    )
+    lines += [
+        "",
+        f"<b>Đề xuất xử lý:</b> {e_action_vi}",
+        f"<b>Trạng thái:</b> {status_line}",
+    ]
+    if e_raw_log:
+        lines += ["", f"<tg-spoiler>🔧 Raw log: <code>{e_raw_log}</code></tg-spoiler>"]
+    lines += ["", f"<code>{incident_id}</code>"]
+
+    telegram_text = "\n".join(lines)
+    telegram_text = truncate_telegram_text(telegram_text)
+
+    # 7. Nặn nút bấm SOAR chuẩn chỉnh cho thằng soar_backend.py hứng
+    #
+    # ⚠️ THAY ĐỔI QUAN TRỌNG (FIX #5):
+    # callback_data giờ CHỈ chứa "approve_<incident_id>" hoặc "reject_<incident_id>",
+    # KHÔNG còn nhét action/target/alert_id trực tiếp vào chuỗi nữa — vì:
+    #   (a) tránh vượt giới hạn 64 byte của Telegram khi IP dài hoặc alert_id dài,
+    #   (b) buộc backend phải đọc lại action/target từ chính file
+    #       {incident_id}.json (trường "pending_action") — nơi đã được
+    #       enforce_failsafe_actions() xử lý — thay vì tin vào một chuỗi
+    #       callback có thể bị AI đề xuất sai.
+    #
+    # => soar_backend.py CẦN được cập nhật tương ứng để parse
+    #    "approve_<incident_id>" / "reject_<incident_id>" và đọc
+    #    REPORTS_DIR/<incident_id>.json để lấy action + target_ip.
+    action = final_report["recommended_actions"][0] if final_report["recommended_actions"] else "monitor"
+    target = final_report["pending_action"]["target_ip"]
+
+    if auto_block:
+        # Đã tự động chặn rồi — không cần Approve, chỉ cần 1 nút xác nhận đã đọc.
+        dynamic_reply_markup = {
+            "inline_keyboard": [[
+                {
+                    "text": f"☑️ Đã biết (tự động chặn {target})",
+                    "callback_data": f"reject_{incident_id}",
+                }
+            ]]
+        }
+    elif action in ["block_ip", "isolate-machine"]:
+        display_action_vi = ACTION_LABELS_VI.get(action, action).upper()
+        dynamic_reply_markup = {
+            "inline_keyboard": [[
+                {
+                    "text": f"✅ Duyệt {display_action_vi} ({target})",
+                    "callback_data": f"approve_{incident_id}",
+                },
+                {
+                    "text": "❌ Từ chối",
+                    "callback_data": f"reject_{incident_id}",
+                },
+            ]]
+        }
+    else:
+        dynamic_reply_markup = {
+            "inline_keyboard": [[
+                {
+                    "text": "👁️ Đã xem & Theo dõi",
+                    "callback_data": f"reject_{incident_id}",
+                }
+            ]]
+        }
+
+    # 8. Gửi payload sang Telegram qua Bot API công khai (có retry)
+    tg_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": telegram_text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+        "reply_markup": dynamic_reply_markup,
+    }
+
+    tg_response = request_with_retry(
+        "POST", tg_url, json=payload, timeout=REQUEST_TIMEOUT_TELEGRAM
+    )
+    if tg_response is None or tg_response.status_code != 200:
+        status = tg_response.status_code if tg_response is not None else "no-response"
+        body = tg_response.text[:300] if tg_response is not None else ""
+        logging.error(f"Gửi Telegram thất bại (status={status}): {body}")
+
+    # =====================================================================
+    # 9. BẮN KÈM FILE JSON LÊN TELEGRAM (UPDATE CHO TN3)
+    # =====================================================================
+    doc_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
+    try:
+        report_path = os.path.join(REPORTS_DIR, f"{incident_id}.json")
+        with open(report_path, "rb") as doc_file:
+            doc_payload = {
+                "chat_id": TELEGRAM_CHAT_ID,
+                "caption": f"📄 Full Incident Report: {incident_id}"
+            }
+            doc_files = {
+                "document": (f"{incident_id}.json", doc_file, "application/json")
+            }
+            requests.post(doc_url, data=doc_payload, files=doc_files, timeout=REQUEST_TIMEOUT_TELEGRAM)
+    except Exception as e:
+        logging.error(f"Lỗi khi gửi file JSON đính kèm lên Telegram: {e}")
+
+if __name__ == "__main__":
+    main()
