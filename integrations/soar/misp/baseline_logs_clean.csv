@@ -1,0 +1,76 @@
+import requests
+import pandas as pd
+import urllib3
+
+# 1. Tắt cảnh báo bảo mật SSL khi dùng verify=False trong môi trường Lab
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# 2. Cấu hình API Indexer
+INDEXER_URL = "https://localhost:9200/wazuh-alerts-*/_search"
+AUTH = ('admin', 'Wazuh-Admin123.') # <-- NHỚ ĐỔI MẬT KHẨU Ở ĐÂY
+
+def fetch_all_logs(max_results=5000):
+    """Hàm gọi API để cào dữ liệu từ Indexer"""
+    headers = {'Content-Type': 'application/json'}
+    query = {
+        "size": max_results,
+        "query": {"match_all": {}},
+        "sort": [{"@timestamp": {"order": "desc"}}] # Lấy log mới nhất
+    }
+    
+    try:
+        print("Đang kết nối đến Wazuh Indexer...")
+        response = requests.post(INDEXER_URL, headers=headers, json=query, auth=AUTH, verify=False)
+        response.raise_for_status() # Bắt lỗi nếu sai mật khẩu hoặc sai IP
+        
+        hits = response.json().get('hits', {}).get('hits', [])
+        print(f"-> Đã cào thành công {len(hits)} dòng log thô!")
+        return hits
+        
+    except requests.exceptions.RequestException as e:
+        print(f" Lỗi kết nối API. Vui lòng kiểm tra lại: {e}")
+        return []
+
+# 3. Bắt đầu quá trình Cào và Làm sạch
+raw_data = fetch_all_logs()
+
+if raw_data:
+    print("Đang tiến hành làm sạch và bóc tách dữ liệu...")
+    cleaned_logs = []
+    
+    for item in raw_data:
+        source = item.get('_source', {})
+        
+        # Bóc tách các trường lồng nhau (Flattening) để AI dễ đọc
+        log_entry = {
+            'timestamp': source.get('timestamp', ''),
+            'rule_id': source.get('rule', {}).get('id', ''),
+            'rule_level': source.get('rule', {}).get('level', ''),
+            'rule_description': source.get('rule', {}).get('description', ''),
+            'agent_name': source.get('agent', {}).get('name', ''),
+            'agent_ip': source.get('agent', {}).get('ip', ''),
+            'decoder_name': source.get('decoder', {}).get('name', ''),
+            'full_log': source.get('full_log', '')
+        }
+        cleaned_logs.append(log_entry)
+
+    # Chuyển dữ liệu đã làm sạch thành dạng Bảng
+    df_clean = pd.DataFrame(cleaned_logs)
+
+    # 4. Xuất dữ liệu ra file
+    csv_file = "baseline_logs_clean.csv"
+    json_file = "baseline_logs_clean.json"
+    
+    df_clean.to_csv(csv_file, index=False, encoding='utf-8')
+    df_clean.to_json(json_file, orient='records', force_ascii=False, indent=4)
+
+    print("-" * 40)
+    print(" HOÀN TẤT NHIỆM VỤ! Đã lưu 2 file sạch:")
+    print(f"  1. {csv_file}")
+    print(f"  2. {json_file}")
+    print("-" * 40)
+    
+    # Hiển thị 5 dòng đầu tiên ngay trên Jupyter để kiểm tra nhanh
+    display(df_clean.head())
+else:
+    print("Không có dữ liệu, quá trình xuất file bị hủy.")
