@@ -10,12 +10,6 @@
 [![Python](https://img.shields.io/badge/Automation-Python%203.10%2B-005EB8?style=flat-square)](https://www.python.org/)
 [![Status](https://img.shields.io/badge/Status-Lab%20Handover-F59E0B?style=flat-square)](#trạng-thái-bàn-giao)
 
-**Baseline tài liệu:** 03/08/2026  
-**Repository snapshot:** `966e1f4c08c4fd1f4f923c4ad471902c9b1c9971`  
-**Phạm vi sử dụng:** môi trường lab, đào tạo, thực tập và thử nghiệm nội bộ có kiểm soát.
-
-> [!CAUTION]
-> Repository snapshot hiện có một số token, API key và mật khẩu được khai báo trực tiếp trong mã nguồn. Phải **thu hồi/rotate toàn bộ credential, làm sạch Git history và chuyển secrets sang secret manager hoặc biến môi trường** trước khi clone, fork, public hoặc triển khai lại.
 
 ---
 
