@@ -16,24 +16,23 @@
 ## Mục lục
 
 - [1. Tổng quan](#1-tổng-quan)
-- [2. Mục tiêu và phạm vi](#2-mục-tiêu-và-phạm-vi)
-- [3. Trạng thái bàn giao](#3-trạng-thái-bàn-giao)
-- [4. Kiến trúc hệ thống](#4-kiến-trúc-hệ-thống)
-- [5. Quy hoạch hạ tầng](#5-quy-hoạch-hạ-tầng)
-- [6. Luồng dữ liệu và xử lý sự cố](#6-luồng-dữ-liệu-và-xử-lý-sự-cố)
-- [7. Nền tảng và công nghệ](#7-nền-tảng-và-công-nghệ)
-- [8. Detection Engineering và MITRE ATT&CK](#8-detection-engineering-và-mitre-attck)
-- [9. Threat Intelligence, TheHive và Cortex](#9-threat-intelligence-thehive-và-cortex)
-- [10. AI, ChatOps và NL2Query](#10-ai-chatops-và-nl2query)
-- [11. Dashboard, SOC Workflow và Playbook](#11-dashboard-soc-workflow-và-playbook)
-- [12. Kết quả kiểm thử](#12-kết-quả-kiểm-thử)
-- [13. Cấu trúc repository](#13-cấu-trúc-repository)
-- [14. Hướng dẫn triển khai](#14-hướng-dẫn-triển-khai)
-- [15. Kiểm tra vận hành](#15-kiểm-tra-vận-hành)
-- [16. Bảo mật và quản lý secrets](#16-bảo-mật-và-quản-lý-secrets)
-- [17. Known Issues và lộ trình](#17-known-issues-và-lộ-trình)
-- [18. Thành viên](#18-thành-viên)
-- [19. Tài liệu tham khảo](#19-tài-liệu-tham-khảo)
+- [2. Thành viên](#2-thành-viên)
+- [3. Mục tiêu và phạm vi](#3-mục-tiêu-và-phạm-vi)
+- [4. Trạng thái bàn giao](#4-trạng-thái-bàn-giao)
+- [5. Kiến trúc hệ thống](#5-kiến-trúc-hệ-thống)
+- [6. Quy hoạch hạ tầng](#6-quy-hoạch-hạ-tầng)
+- [7. Luồng dữ liệu và xử lý sự cố](#7-luồng-dữ-liệu-và-xử-lý-sự-cố)
+- [8. Nền tảng và công nghệ](#8-nền-tảng-và-công-nghệ)
+- [9. Detection Engineering và MITRE ATT&CK](#9-detection-engineering-và-mitre-attck)
+- [10. Threat Intelligence, TheHive và Cortex](#10-threat-intelligence-thehive-và-cortex)
+- [11. AI, ChatOps và NL2Query](#11-ai-chatops-và-nl2query)
+- [12. Dashboard, SOC Workflow và Playbook](#12-dashboard-soc-workflow-và-playbook)
+- [13. Kết quả kiểm thử](#13-kết-quả-kiểm-thử)
+- [14. Cấu trúc repository](#14-cấu-trúc-repository)
+- [15. Hướng dẫn triển khai](#15-hướng-dẫn-triển-khai)
+- [16. Kiểm tra vận hành](#16-kiểm-tra-vận-hành)
+- [17. Bảo mật và quản lý secrets](#17-bảo-mật-và-quản-lý-secrets)
+- [18. Tài liệu tham khảo](#18-tài-liệu-tham-khảo)
 
 ---
 
@@ -65,9 +64,20 @@ Dự án ưu tiên khả năng trình diễn end-to-end, tính minh bạch trong
 
 ---
 
-## 2. Mục tiêu và phạm vi
+## 2. Thành viên
 
-### 2.1. Mục tiêu
+| Thành viên | Mã số sinh viên | Vai trò |
+|---|---|---|
+| Đinh Đăng Khoa | CE190369 | Leader |
+| Hứa Hồ Nhân Nghĩa | CE190490 | Member |
+| Nguyễn Võ Quốc Thái | CE190072 | Member |
+| Bùi Đức Trọng | CE191346 | Member |
+
+---
+
+## 3. Mục tiêu và phạm vi
+
+### 3.1. Mục tiêu
 
 - Xây dựng kiến trúc Wazuh Distributed tách Manager, Indexer và Dashboard.
 - Thu thập telemetry có chiều sâu từ Windows và Linux.
@@ -79,7 +89,7 @@ Dự án ưu tiên khả năng trình diễn end-to-end, tính minh bạch trong
 - Ứng dụng AI cho alert enrichment, Incident Report và truy vấn OpenSearch bằng ngôn ngữ tự nhiên.
 - Kiểm thử hệ thống bằng các kịch bản Red/Purple Team trong lab.
 
-### 2.2. Trong phạm vi
+### 3.2. Trong phạm vi
 
 - Wazuh Manager, Indexer và Dashboard phân tán.
 - Windows Agent + Sysmon + FIM.
@@ -90,7 +100,7 @@ Dự án ưu tiên khả năng trình diễn end-to-end, tính minh bạch trong
 - AI Incident Report và nguyên mẫu NL2Query.
 - Red/Purple Team trong mạng lab nội bộ.
 
-### 2.3. Ngoài phạm vi hoặc chưa nghiệm thu
+### 3.3. Ngoài phạm vi hoặc chưa nghiệm thu
 
 - High availability nhiều Indexer node và replica.
 - Pentest trên hệ thống production hoặc tài sản không được ủy quyền.
@@ -102,7 +112,7 @@ Dự án ưu tiên khả năng trình diễn end-to-end, tính minh bạch trong
 
 ---
 
-## 3. Trạng thái bàn giao
+## 4. Trạng thái bàn giao
 
 | Năng lực | Trạng thái | Ghi chú |
 |---|---|---|
@@ -125,7 +135,7 @@ Dự án ưu tiên khả năng trình diễn end-to-end, tính minh bạch trong
 
 ---
 
-## 4. Kiến trúc hệ thống
+## 5. Kiến trúc hệ thống
 
 ```mermaid
 flowchart LR
@@ -163,14 +173,12 @@ Sơ đồ ảnh trong repository:
 - [`docs/architecture_diagram/architecture.png`](docs/architecture_diagram/architecture.png)
 - [`docs/architecture_diagram/IP-plan.png`](docs/architecture_diagram/IP-plan.png)
 
-> [!NOTE]
-> Mermaid phía trên phản ánh baseline bàn giao mới. Các ảnh cũ trong repository cần được kiểm tra và cập nhật nếu còn thể hiện ZeroTier, thiếu TheHive/Cortex/MISP hoặc trạng thái AI không còn đúng.
 
 ---
 
-## 5. Quy hoạch hạ tầng
+## 6. Quy hoạch hạ tầng
 
-### 5.1. IP Plan
+### 6.1. IP Plan
 
 | Thành phần | Địa chỉ IP | Vai trò |
 |---|---:|---|
@@ -185,7 +193,7 @@ Sơ đồ ảnh trong repository:
 
 Mô hình mạng cuối cùng sử dụng **router vật lý kết hợp Bridge Mode** cho các máy ảo. ZeroTier không còn là mạng vận hành chính. Các node lõi dùng IP tĩnh trong dải `192.168.0.0/24`; độ trễ nội bộ được ghi nhận dưới 1 ms trong bài kiểm tra ping lab.
 
-### 5.2. Baseline tài nguyên
+### 6.2. Baseline tài nguyên
 
 | Node | RAM | Disk |
 |---|---:|---:|
@@ -195,7 +203,7 @@ Mô hình mạng cuối cùng sử dụng **router vật lý kết hợp Bridge 
 | TheHive / Cortex | 12 GB | 65 GB |
 | MISP | 4 GB | 50 GB |
 
-### 5.3. Port chính
+### 6.3. Port chính
 
 | Dịch vụ | Port | Giao thức | Mục đích |
 |---|---:|---|---|
@@ -215,9 +223,9 @@ Chứng chỉ self-signed do bộ cài Wazuh tạo được dùng làm root CA t
 
 ---
 
-## 6. Luồng dữ liệu và xử lý sự cố
+## 7. Luồng dữ liệu và xử lý sự cố
 
-### 6.1. Log-to-Alert
+### 7.1. Log-to-Alert
 
 ```text
 Endpoint / WAF / Syslog
@@ -230,7 +238,7 @@ Endpoint / WAF / Syslog
         → Dashboard / Discover
 ```
 
-### 6.2. Alert-to-Incident
+### 7.2. Alert-to-Incident
 
 ```text
 Wazuh Alert
@@ -242,7 +250,7 @@ Wazuh Alert
    → Cortex analyzer (khi có observable phù hợp)
 ```
 
-### 6.3. Human-in-the-loop Response
+### 7.3. Human-in-the-loop Response
 
 ```text
 Telegram Alert
@@ -257,10 +265,8 @@ Telegram Alert
 
 ---
 
-## 7. Nền tảng và công nghệ
+## 8. Nền tảng và công nghệ
 
-> [!IMPORTANT]
-> Bảng dưới là baseline từ tài liệu/repository. Trước khi bàn giao chính thức, phải chạy package inventory hoặc API version trên từng node và cập nhật CMDB.
 
 | Lớp | Công nghệ | Baseline ghi nhận | Mục đích |
 |---|---|---|---|
@@ -290,9 +296,9 @@ Indexer đang sử dụng mô hình single-node với `1 primary shard / 0 repli
 
 ---
 
-## 8. Detection Engineering và MITRE ATT&CK
+## 9. Detection Engineering và MITRE ATT&CK
 
-### 8.1. Snapshot rule/decoder
+### 9.1. Snapshot rule/decoder
 
 | Hạng mục | Số lượng trong snapshot |
 |---|---:|
@@ -301,7 +307,7 @@ Indexer đang sử dụng mô hình single-node với `1 primary shard / 0 repli
 | MITRE Technique ID | 21 |
 | MITRE Tactic | 11 |
 
-### 8.2. Nhóm phát hiện chính
+### 9.2. Nhóm phát hiện chính
 
 - Windows Sysmon: process execution, Process Injection, Registry persistence, credential access, DNS và exfiltration.
 - Linux Sysmon: process creation, network connection, file creation/deletion và thay đổi cấu hình.
@@ -311,11 +317,11 @@ Indexer đang sử dụng mô hình single-node với `1 primary shard / 0 repli
 - FIM: thêm, sửa, xóa file và đối sánh hash.
 - Tuning: giảm nhiễu từ agent/system process.
 
-### 8.3. MITRE coverage tiêu biểu
+### 9.3. MITRE coverage tiêu biểu
 
 `T1003`, `T1020`, `T1021.002`, `T1047`, `T1048`, `T1055`, `T1059`, `T1071`, `T1071.004`, `T1083`, `T1105`, `T1110`, `T1190`, `T1204`, `T1485`, `T1547.001`, `T1562`, `T1569.002` và các technique/sub-technique liên quan.
 
-### 8.4. Chất lượng detection
+### 9.4. Chất lượng detection
 
 - False Positive Rate hiện được ghi nhận ở mức **15–20%**.
 - Mục tiêu giai đoạn tiếp theo: **dưới 10%** trên bộ test có nhãn cố định.
@@ -324,9 +330,9 @@ Indexer đang sử dụng mô hình single-node với `1 primary shard / 0 repli
 
 ---
 
-## 9. Threat Intelligence, TheHive và Cortex
+## 10. Threat Intelligence, TheHive và Cortex
 
-### 9.1. MISP
+### 10.1. MISP
 
 - Đồng bộ từ community threat feed.
 - Chu kỳ pull được ghi nhận: **15 phút/lần**.
@@ -334,17 +340,15 @@ Indexer đang sử dụng mô hình single-node với `1 primary shard / 0 repli
 - Đã test IOC match và sinh alert thành công.
 - Luồng tích hợp được thiết kế hai chiều giữa MISP và quy trình incident.
 
-> [!WARNING]
-> Snapshot repository chưa chứa đầy đủ script đồng bộ `MISP → CDB List` được mô tả trong tài liệu. Cần bổ sung artifact, systemd/cron unit và hướng dẫn rollback trước khi bàn giao mã nguồn.
 
-### 9.2. VirusTotal và AbuseIPDB
+### 10.2. VirusTotal và AbuseIPDB
 
 - VirusTotal dùng để kiểm tra file hash từ FIM/process telemetry.
 - AbuseIPDB dùng để kiểm tra IP reputation và abuse confidence score.
 - Volume lab thấp, trung bình dưới 5 request/ngày trong giai đoạn kiểm thử.
 - Khi mở rộng cần cache, retry/backoff và xử lý HTTP 429.
 
-### 9.3. TheHive/Cortex
+### 10.3. TheHive/Cortex
 
 - TheHive tiếp nhận alert/case và lưu incident history.
 - Cortex phân tích observable bằng analyzer phù hợp.
@@ -354,9 +358,9 @@ Indexer đang sử dụng mô hình single-node với `1 primary shard / 0 repli
 
 ---
 
-## 10. AI, ChatOps và NL2Query
+## 11. AI, ChatOps và NL2Query
 
-### 10.1. Trạng thái chức năng
+### 11.1. Trạng thái chức năng
 
 | Tính năng | Trạng thái | Giới hạn |
 |---|---|---|
@@ -367,7 +371,7 @@ Indexer đang sử dụng mô hình single-node với `1 primary shard / 0 repli
 | Dynamic Playbook | Chưa hoàn thiện | Có prompt/code thử nghiệm, không thuộc acceptance hiện tại. |
 | Gap Analysis | Chưa hoàn thiện | Chưa có ground truth và quy trình tự động đủ tin cậy. |
 
-### 10.2. Incident Report schema
+### 11.2. Incident Report schema
 
 ```json
 {
@@ -386,7 +390,7 @@ Indexer đang sử dụng mô hình single-node với `1 primary shard / 0 repli
 
 Các field trống phải được chuẩn hóa thành `"N/A"` hoặc `[]`, tránh trả về `null` gây lỗi parse.
 
-### 10.3. NL2Query flow
+### 11.3. NL2Query flow
 
 ```text
 /query <câu hỏi tiếng Việt>
@@ -412,7 +416,7 @@ Mã nguồn hiện có các lớp kiểm soát:
 
 Các lớp này giảm rủi ro kỹ thuật nhưng **không giải quyết hoàn toàn lỗi ngữ nghĩa**. Không dùng kết quả NL2Query để tự động block, đóng case hoặc kết luận điều tra nếu chưa xác minh trên Discover/Dev Tools.
 
-### 10.4. Data governance
+### 11.4. Data governance
 
 Mã nguồn mới có sử dụng Gemini API. Điều này có thể gửi câu hỏi, field reference hoặc dữ liệu sự cố ra hạ tầng cloud. Trước khi sử dụng trong doanh nghiệp cần:
 
@@ -424,9 +428,9 @@ Mã nguồn mới có sử dụng Gemini API. Điều này có thể gửi câu 
 
 ---
 
-## 11. Dashboard, SOC Workflow và Playbook
+## 12. Dashboard, SOC Workflow và Playbook
 
-### 11.1. Dashboard
+### 12.1. Dashboard
 
 - **Overview Dashboard:** tổng quan alert, severity, agent và xu hướng.
 - **Endpoint Dashboard:** FIM, Sysmon và endpoint security; được ghi nhận hoàn thiện.
@@ -436,7 +440,7 @@ Mã nguồn mới có sử dụng Gemini API. Điều này có thể gửi câu 
 
 GeoIP sử dụng MaxMind GeoLite2 static snapshot và ingest pipeline trực tiếp trong OpenSearch. Database chưa có lịch update tự động; cần bổ sung `geoipupdate` hoặc quy trình cập nhật định kỳ.
 
-### 11.2. SOC Workflow
+### 12.2. SOC Workflow
 
 | Cấp | Trách nhiệm chính |
 |---|---|
@@ -446,7 +450,7 @@ GeoIP sử dụng MaxMind GeoLite2 static snapshot và ingest pipeline trực ti
 
 TheHive là kênh quản lý case chính; Telegram là kênh cảnh báo/escalation nhanh. SLA phải được cấu hình theo severity và chính sách của đơn vị tiếp nhận.
 
-### 11.3. Playbook
+### 12.3. Playbook
 
 Tài liệu vận hành ghi nhận Playbook v2.0 gồm 16 kịch bản, bao gồm brute force, FIM, suspicious process, IOC match, web incident, DDoS, log tampering và cloud incident. Tuy nhiên snapshot repository chỉ có:
 
@@ -458,9 +462,9 @@ Cần bổ sung artifact v2, chuẩn hóa tên file `incident-response-playbook`
 
 ---
 
-## 12. Kết quả kiểm thử
+## 13. Kết quả kiểm thử
 
-### 12.1. SOC drill
+### 13.1. SOC drill
 
 | Chỉ số | Kết quả ghi nhận |
 |---|---:|
@@ -472,11 +476,11 @@ Cần bổ sung artifact v2, chuẩn hóa tên file `incident-response-playbook`
 | IOC trong MISP/CDB | 1.904 |
 | NL2Query semantic accuracy | Khoảng 60% |
 
-### 12.2. Chỉ số AI
+### 13.2. Chỉ số AI
 
 Các số liệu được ghi nhận sau pentest gồm Severity 92%, MITRE 88%, Valid JSON 100% và một số metric đánh giá khác. Tuy nhiên nhóm chưa tách một fixed test set có sample size cố định, do đó các tỷ lệ này chỉ nên dùng như **kết quả thử nghiệm ban đầu**, không phải benchmark có khả năng tái lặp.
 
-### 12.3. Tiêu chí đề xuất cho vòng nghiệm thu tiếp theo
+### 13.3. Tiêu chí đề xuất cho vòng nghiệm thu tiếp theo
 
 - FPR dưới 10% trên tập alert có nhãn.
 - Duplicate case dưới 1% và idempotency pass khi retry.
@@ -488,7 +492,7 @@ Các số liệu được ghi nhận sau pentest gồm Severity 92%, MITRE 88%, 
 
 ---
 
-## 13. Cấu trúc repository
+## 14. Cấu trúc repository
 
 ```text
 SIEM-WAZUH/
@@ -526,8 +530,6 @@ SIEM-WAZUH/
 └── README.md
 ```
 
-> [!NOTE]
-> Các tên thư mục `artifical-intelligence` và `active-respone` đang được giữ nguyên để khớp snapshot. Nên đổi thành `artificial-intelligence` và `active-response` trong một pull request riêng, đồng thời sửa toàn bộ path phụ thuộc.
 
 ### Artifact cần bổ sung hoặc đồng bộ
 
@@ -543,9 +545,9 @@ SIEM-WAZUH/
 
 ---
 
-## 14. Hướng dẫn triển khai
+## 15. Hướng dẫn triển khai
 
-### 14.1. Điều kiện tiên quyết
+### 15.1. Điều kiện tiên quyết
 
 - Ubuntu Server 22.04 LTS hoặc phiên bản được Wazuh hỗ trợ tại thời điểm triển khai.
 - Python 3.10+.
@@ -554,7 +556,7 @@ SIEM-WAZUH/
 - Certificate, API key và token mới; không tái sử dụng credential trong lịch sử Git.
 - Snapshot/backup trước khi ghi đè cấu hình.
 
-### 14.2. Cài nền tảng lõi
+### 15.2. Cài nền tảng lõi
 
 Cài Wazuh Manager, Indexer và Dashboard theo tài liệu chính thức của Wazuh. Repository này tập trung vào **cấu hình và integration artifact**, không thay thế bộ cài hoặc compatibility matrix của nhà cung cấp.
 
@@ -566,7 +568,7 @@ sudo /var/ossec/bin/wazuh-control status
 sudo systemctl status wazuh-manager filebeat
 ```
 
-### 14.3. Triển khai decoder và rule
+### 15.3. Triển khai decoder và rule
 
 ```bash
 sudo cp /var/ossec/etc/decoders/local_decoder.xml \
@@ -590,7 +592,7 @@ sudo tail -n 100 /var/ossec/logs/ossec.log
 
 Không restart Manager nếu `wazuh-logtest` hoặc XML validation báo lỗi.
 
-### 14.4. Windows Agent và Sysmon
+### 15.4. Windows Agent và Sysmon
 
 1. Cài Wazuh Agent và trỏ về `192.168.0.11`.
 2. Backup `ossec.conf` hiện tại.
@@ -604,7 +606,7 @@ Get-Service Sysmon64
 Get-WinEvent -LogName "Microsoft-Windows-Sysmon/Operational" -MaxEvents 5
 ```
 
-### 14.5. Indexer và Dashboard
+### 15.5. Indexer và Dashboard
 
 Cấu hình trong `indexer/` và `dashboard/` chỉ nên được merge có kiểm soát, không copy đè mù quáng. Cần xác minh:
 
@@ -617,7 +619,7 @@ Cấu hình trong `indexer/` và `dashboard/` chỉ nên được merge có ki�
 - Indexer URL và user/role;
 - retention/ISM policy.
 
-### 14.6. Python dependencies
+### 15.6. Python dependencies
 
 ```bash
 python3 -m venv .venv
@@ -626,7 +628,7 @@ python -m pip install --upgrade pip
 python -m pip install requests flask google-genai
 ```
 
-### 14.7. Cấu hình secrets — mô hình khuyến nghị
+### 15.7. Cấu hình secrets — mô hình khuyến nghị
 
 Tạo file `.env` nằm ngoài Git hoặc dùng secret manager:
 
@@ -656,10 +658,8 @@ OLLAMA_URL=http://<approved-host>:11434
 OLLAMA_MODEL=llama3.1
 ```
 
-> [!WARNING]
-> Mã nguồn hiện tại chưa đồng nhất trong cách đọc biến môi trường; một số file vẫn hardcode cấu hình. Phải refactor và test trước khi kỳ vọng `.env` hoạt động cho toàn bộ module.
 
-### 14.8. Integration scripts
+### 15.8. Integration scripts
 
 Các script Wazuh integration phải:
 
@@ -686,9 +686,9 @@ Cần kiểm tra tên integration trong `manager/ossec.conf` và XML snippet tr�
 
 ---
 
-## 15. Kiểm tra vận hành
+## 16. Kiểm tra vận hành
 
-### 15.1. Wazuh Manager
+### 16.1. Wazuh Manager
 
 ```bash
 sudo /var/ossec/bin/wazuh-control status
@@ -697,7 +697,7 @@ sudo tail -n 100 /var/ossec/logs/ossec.log
 sudo tail -n 20 /var/ossec/logs/alerts/alerts.json
 ```
 
-### 15.2. Indexer/OpenSearch
+### 16.2. Indexer/OpenSearch
 
 ```bash
 curl -k -u '<user>:<password>' \
@@ -707,14 +707,14 @@ curl -k -u '<user>:<password>' \
   'https://192.168.0.10:9200/_cat/indices/wazuh-*?v'
 ```
 
-### 15.3. Agent
+### 16.3. Agent
 
 ```bash
 sudo /var/ossec/bin/agent_control -lc
 sudo /var/ossec/bin/agent_control -i <agent-id>
 ```
 
-### 15.4. Service và network
+### 16.4. Service và network
 
 ```bash
 systemctl --no-pager --failed
@@ -722,7 +722,7 @@ ss -lntup
 ufw status numbered
 ```
 
-### 15.5. Test end-to-end tối thiểu
+### 16.5. Test end-to-end tối thiểu
 
 1. Tạo file trong thư mục FIM test.
 2. Chạy một lệnh PowerShell/cmd an toàn để tạo Sysmon Event 1.
@@ -734,9 +734,9 @@ ufw status numbered
 
 ---
 
-## 16. Bảo mật và quản lý secrets
+## 17. Bảo mật và quản lý secrets
 
-### 16.1. Hành động bắt buộc trước khi bàn giao
+### 17.1. Hành động bắt buộc trước khi bàn giao
 
 1. Thu hồi toàn bộ token/API key/password đã từng xuất hiện trong source hoặc chat.
 2. Tạo credential mới theo nguyên tắc least privilege.
@@ -747,7 +747,7 @@ ufw status numbered
 7. Giới hạn Wazuh API, Indexer, TheHive, Cortex và MISP theo source IP/role.
 8. Mã hóa backup và kiểm tra restore.
 
-### 16.2. Quét secret
+### 17.2. Quét secret
 
 ```bash
 gitleaks detect --source .
@@ -755,7 +755,7 @@ gitleaks detect --source .
 
 Hoặc dùng công cụ secret scanner đã được doanh nghiệp phê duyệt.
 
-### 16.3. Không commit
+### 17.3. Không commit
 
 ```gitignore
 .env
@@ -771,48 +771,8 @@ reports/incidents/
 
 ---
 
-## 17. Known Issues và lộ trình
 
-### 17.1. Known Issues
-
-| Mức | Vấn đề | Hành động đề xuất |
-|---|---|---|
-| Critical | Credential hardcode trong snapshot | Rotate, scrub Git history, secret manager và CI scan. |
-| High | NL2Query chỉ khoảng 60% semantic accuracy | Golden set, live mapping, compiler/IR và semantic regression test. |
-| High | Dynamic Playbook và Gap Analysis chưa hoàn thiện | Tách khỏi acceptance; xây baseline deterministic trước AI. |
-| High | Indexer single-node, 0 replica | Thiết kế cluster HA hoặc định nghĩa rõ backup/restore SLA. |
-| Medium | Duplicate alert/TheHive case | Chuẩn hóa idempotency key và `sourceRef`. |
-| Medium | FPR 15–20% | Fixed labeled corpus, allowlist và adaptive threshold. |
-| Medium | Network Dashboard còn tinh chỉnh | Chốt field mapping, panel và acceptance checklist. |
-| Medium | Playbook v2 chưa đồng bộ repository | Bổ sung artifact và version control. |
-| Medium | Retention chưa chốt 30 hay 90 ngày | Xác minh ISM/ILM policy và cập nhật CMDB. |
-| Medium | SSH rule timeframe không đồng nhất | Chốt XML, test lại FPR và đồng bộ tài liệu. |
-| Low | GeoIP là static snapshot | Cập nhật định kỳ bằng quy trình được phê duyệt. |
-| Low | Version component chưa đầy đủ | Tạo `VERSIONS.md` hoặc software inventory tự động. |
-
-### 17.2. Lộ trình đề xuất
-
-- **P0 — Secure Handover:** rotate secrets, scrub repository, backup/restore, inventory version.
-- **P1 — Stabilize:** dedup TheHive, chốt SSH correlation, hoàn thiện Network Dashboard, giảm FPR.
-- **P2 — Operationalize:** Playbook v2, SLA, CMDB, RBAC và regression test.
-- **P3 — Scale:** Indexer HA, automated backup, CI/CD detection engineering.
-- **P4 — AI Hardening:** golden test set, data governance và nâng semantic accuracy NL2Query.
-- **P5 — Advanced Automation:** Dynamic Playbook và Gap Analysis với guardrail xác định trước.
-
----
-
-## 18. Thành viên
-
-| Thành viên | Mã số sinh viên | Vai trò |
-|---|---|---|
-| Đinh Đăng Khoa | CE190369 | Leader |
-| Hứa Hồ Nhân Nghĩa | CE190490 | Member |
-| Nguyễn Võ Quốc Thái | CE190072 | Member |
-| Bùi Đức Trọng | CE191346 | Member |
-
----
-
-## 19. Tài liệu tham khảo
+## 18. Tài liệu tham khảo
 
 ### Tài liệu trong repository
 
@@ -837,9 +797,3 @@ reports/incidents/
 - [AbuseIPDB API](https://docs.abuseipdb.com/)
 
 ---
-
-## Lưu ý sử dụng
-
-Dự án được xây dựng cho mục đích học tập, thực tập và kiểm thử nội bộ. Chỉ thực hiện quét, khai thác, Active Response hoặc thao tác cô lập trên hệ thống thuộc quyền quản lý và đã được ủy quyền rõ ràng.
-
-Repository hiện chưa có file `LICENSE`. Việc sao chép, phân phối hoặc tái sử dụng ngoài phạm vi nhóm cần được chủ sở hữu repository cho phép và phải tuân thủ license của các thành phần bên thứ ba.
